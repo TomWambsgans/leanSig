@@ -249,7 +249,7 @@ where
 ///
 /// Note: HASH_LEN, TWEAK_LEN, CAPACITY, and PARAMETER_LEN must
 /// be given in the unit "number of field elements".
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq, PartialOrd, Eq, Ord, Hash)]
 pub struct PoseidonTweakHash<
     const PARAMETER_LEN: usize,
     const HASH_LEN: usize,
