@@ -875,7 +875,7 @@ where
         Ok(GeneralizedXMSSSignature { path, rho, hashes })
     }
 
-    fn verify_with_poseidons_trace(
+    fn verify_with_trace(
         pk: &Self::PublicKey,
         epoch: u32,
         message: &[u8; MESSAGE_LENGTH],

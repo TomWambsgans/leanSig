@@ -197,7 +197,7 @@ pub trait SignatureScheme {
     /// * `epoch`: The epoch the signature corresponds to.
     /// * `message`: The message that was supposedly signed.
     /// * `sig`: A reference to the signature to be verified.
-    fn verify_with_poseidons_trace(
+    fn verify_with_trace(
         pk: &Self::PublicKey,
         epoch: u32,
         message: &[u8; MESSAGE_LENGTH],
@@ -206,7 +206,7 @@ pub trait SignatureScheme {
 
     /// Verifies a digital signature against a public key, message, and epoch.
     ///
-    /// This is a convenience wrapper around [`Self::verify_with_poseidons_trace`]
+    /// This is a convenience wrapper around [`Self::verify_with_trace`]
     /// that discards the Poseidon traces.
     ///
     /// ### Returns
@@ -217,7 +217,7 @@ pub trait SignatureScheme {
         message: &[u8; MESSAGE_LENGTH],
         sig: &Self::Signature,
     ) -> bool {
-        Self::verify_with_poseidons_trace(pk, epoch, message, sig).0
+        Self::verify_with_trace(pk, epoch, message, sig).0
     }
 }
 
