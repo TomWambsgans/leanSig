@@ -161,7 +161,7 @@ fn poseidon_safe_domain_separator<const OUT_LEN: usize>(
     poseidon_compress::<F, _, MERGE_COMPRESSION_WIDTH, OUT_LEN>(perm, &input)
 }
 
-/// Poseidon Sponge Hash Function
+/// Poseidon T-Sponge with "Replacement" Hash Function
 ///
 /// Absorbs an arbitrary-length input using the Poseidon sponge construction
 /// and outputs `OUT_LEN` field elements. Domain separation is achieved by
@@ -182,10 +182,17 @@ fn poseidon_safe_domain_separator<const OUT_LEN: usize>(
 /// This follows the classic sponge structure:
 /// - **Absorption**: inputs are added chunk-by-chunk into the first `rate` elements of the state.
 /// - **Squeezing**: outputs are read from the first `rate` elements of the state, permuted as needed.
+/// 
+/// ### "T-Sponge"
+/// This means we use Poseidon in compresson mode (not a permutation), at each step.
+/// 
+/// ### "Replacement"
+/// This means we "replace" the first `rate` elements of the state with the input chunk, instead
+/// of adding (in the sense of finite field addition).
 ///
 /// ### Panics
 /// - If `capacity_value.len() >= WIDTH`
-fn poseidon_sponge<A, P, const WIDTH: usize, const OUT_LEN: usize>(
+fn poseidon_replacement_t_sponge<A, P, const WIDTH: usize, const OUT_LEN: usize>(
     perm: &P,
     capacity_value: &[A],
     input: &[A],
@@ -215,19 +222,21 @@ where
     for chunk in &mut it {
         // add chunk elements into the first `rate` many elements of the `state`
         for (s, &x) in state.iter_mut().take(rate).zip(chunk) {
-            *s += x;
+            *s = x; // 'replacement' sponge
         }
-        perm.permute_mut(&mut state);
+        state = poseidon_compress::<A, _, WIDTH, WIDTH>(perm, &state); // T-sponge
     }
     // 2. Fill the remainder and pad with zeros.
     // NOTE: This zero-padding is secure for constant-size inputs but may be insecure elsewhere.
     if !it.remainder().is_empty() {
+        let num_remainder = it.remainder().len();
         for (i, x) in it.remainder().iter().enumerate() {
-            state[i] += *x;
+            state[i] = *x;
         }
-        // Since we only *add* to the state, positions beyond the remainder remain zero
-        // (their initial value), so no explicit zero-padding is needed.
-        perm.permute_mut(&mut state);
+        for s in &mut state[num_remainder..rate] {
+            *s = A::ZERO;
+        }
+        state = poseidon_compress::<A, _, WIDTH, WIDTH>(perm, &state); // T-sponge
     }
 
     // 3. squeeze
@@ -239,7 +248,7 @@ where
         out_index += chunk_size;
         if out_index < OUT_LEN {
             // no need to permute in last iteration, `state` is local variable
-            perm.permute_mut(&mut state);
+            state = poseidon_compress::<A, _, WIDTH, WIDTH>(perm, &state); // T-sponge
         }
     }
     out
@@ -400,7 +409,7 @@ impl<
                     HASH_LEN as u32,
                 ];
                 let capacity_value = poseidon_safe_domain_separator::<CAPACITY>(&perm, &lengths);
-                FieldArray(poseidon_sponge::<F, _, MERGE_COMPRESSION_WIDTH, HASH_LEN>(
+                FieldArray(poseidon_replacement_t_sponge::<F, _, MERGE_COMPRESSION_WIDTH, HASH_LEN>(
                     &perm,
                     &capacity_value,
                     &combined_input,
@@ -678,7 +687,7 @@ impl<
 
                     // Apply the sponge hash to produce the leaf.
                     // This absorbs all chain ends and squeezes out the final hash.
-                    poseidon_sponge::<PackedF, _, MERGE_COMPRESSION_WIDTH, HASH_LEN>(
+                    poseidon_replacement_t_sponge::<PackedF, _, MERGE_COMPRESSION_WIDTH, HASH_LEN>(
                         &sponge_perm,
                         &capacity_val,
                         packed_leaf_input,
