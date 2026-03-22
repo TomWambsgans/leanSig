@@ -5,14 +5,17 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    MESSAGE_LENGTH,
+    F, MESSAGE_LENGTH,
     inc_encoding::IncomparableEncoding,
     serialization::Serializable,
     signature::SignatureSchemeSecretKey,
     symmetric::{
         prf::Pseudorandom,
-        tweak_hash::{TweakableHash, chain},
-        tweak_hash_tree::{HashSubTree, HashTreeOpening, combined_path, hash_tree_verify},
+        tweak_hash::{TweakableHash, chain, chain_with_trace},
+        tweak_hash_tree::{
+            HashSubTree, HashTreeOpening, combined_path,
+            hash_tree_verify_with_trace,
+        },
     },
 };
 
@@ -872,12 +875,15 @@ where
         Ok(GeneralizedXMSSSignature { path, rho, hashes })
     }
 
-    fn verify(
+    fn verify_with_poseidons_trace(
         pk: &Self::PublicKey,
         epoch: u32,
         message: &[u8; MESSAGE_LENGTH],
         sig: &Self::Signature,
-    ) -> bool {
+    ) -> (bool, Vec<([F; 16], [F; 16])>, Vec<([F; 24], [F; 24])>) {
+        let mut trace_16: Vec<([F; 16], [F; 16])> = Vec::new();
+        let mut trace_24: Vec<([F; 24], [F; 24])> = Vec::new();
+
         debug_assert!(
             (epoch as u64) < Self::LIFETIME,
             "Generalized XMSS - Verify: Epoch too large."
@@ -891,16 +897,18 @@ where
         // some sanity checks on inputs: signature has correct structure
         // and epoch in range. We reject in case a check fails.
         if (epoch as u64) >= Self::LIFETIME {
-            return false;
+            return (false, trace_16, trace_24);
         }
         if sig.hashes.len() != IE::DIMENSION {
-            return false;
+            return (false, trace_16, trace_24);
         }
 
         // first get back the codeword and make sure
         // encoding succeeded with the given randomness.
-        let Ok(x) = IE::encode(&pk.parameter.into(), message, &sig.rho, epoch) else {
-            return false;
+        let Ok(x) =
+            IE::encode_with_trace(&pk.parameter.into(), message, &sig.rho, epoch, &mut trace_24)
+        else {
+            return (false, trace_16, trace_24);
         };
 
         // now, we recompute the epoch's one-time public key
@@ -919,26 +927,32 @@ where
             let steps = (chain_length - 1) as u8 - xi;
             let start_pos_in_chain = *xi;
             let start = &sig.hashes[chain_index];
-            let end = chain::<TH>(
+            let end = chain_with_trace::<TH>(
                 &pk.parameter,
                 epoch,
                 chain_index as u8,
                 start_pos_in_chain,
                 steps as usize,
                 start,
+                &mut trace_16,
+                &mut trace_24,
             );
             chain_ends.push(end);
         }
 
         // this set of chain ends should be a leaf in the Merkle tree
         // we verify that by checking the Merkle authentication path
-        hash_tree_verify(
+        let result = hash_tree_verify_with_trace(
             &pk.parameter,
             &pk.root,
             epoch,
             chain_ends.as_slice(),
             &sig.path,
-        )
+            &mut trace_16,
+            &mut trace_24,
+        );
+
+        (result, trace_16, trace_24)
     }
 }
 

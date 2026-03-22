@@ -3,7 +3,7 @@ use serde::{Serialize, de::DeserializeOwned};
 use thiserror::Error;
 
 use super::MessageHash;
-use super::poseidon::poseidon_message_hash_fe;
+use super::poseidon::poseidon_message_hash_fe_with_trace;
 use crate::F;
 use crate::MESSAGE_LENGTH;
 use crate::array::FieldArray;
@@ -71,11 +71,12 @@ where
     /// Hashes (public_parameter, epoch, randomness, message), and return an error if the resulting outputs does
     /// not pass the rejection sampling check (in order to ensure uniformity of the output distribution), i.e.
     /// if any of the first DIMENSION.div_ceil(Z) output field elements is >= Q * w^z.
-    fn apply(
+    fn apply_with_trace(
         parameter: &Self::Parameter,
         epoch: u32,
         randomness: &Self::Randomness,
         message: &[u8; MESSAGE_LENGTH],
+        trace_24: &mut Vec<([F; 24], [F; 24])>,
     ) -> Result<Vec<u8>, HypercubeHashError> {
         const {
             // Check that Poseidon of width 24 is enough
@@ -124,13 +125,13 @@ where
             );
         }
 
-        let hash_fe = poseidon_message_hash_fe::<
+        let hash_fe = poseidon_message_hash_fe_with_trace::<
             PARAMETER_LEN,
             RAND_LEN_FE,
             HASH_LEN_FE,
             TWEAK_LEN_FE,
             MSG_LEN_FE,
-        >(parameter, epoch, randomness, message);
+        >(parameter, epoch, randomness, message, trace_24);
 
         // Build the output on the stack — no Vec growth overhead.
         let mut chunks = [0u8; DIMENSION];

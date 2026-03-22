@@ -2,6 +2,7 @@ use std::fmt::Debug;
 
 use rand::RngExt;
 
+use crate::F;
 use crate::MESSAGE_LENGTH;
 use crate::serialization::Serializable;
 
@@ -28,15 +29,27 @@ pub trait MessageHash {
     fn rand<R: RngExt>(rng: &mut R) -> Self::Randomness;
 
     /// Applies the message hash to a parameter, an epoch,
-    /// a randomness, and a message. It outputs a list of chunks.
-    /// The list contains DIMENSION many elements, each between
-    /// 0 and BASE - 1 (inclusive).
+    /// a randomness, and a message, recording every Poseidon-24
+    /// compression call into the trace vector.  It outputs a list
+    /// of chunks. The list contains DIMENSION many elements, each
+    /// between 0 and BASE - 1 (inclusive).
+    fn apply_with_trace(
+        parameter: &Self::Parameter,
+        epoch: u32,
+        randomness: &Self::Randomness,
+        message: &[u8; MESSAGE_LENGTH],
+        trace_24: &mut Vec<([F; 24], [F; 24])>,
+    ) -> Result<Vec<u8>, Self::Error>;
+
+    /// Convenience wrapper around [`Self::apply_with_trace`] that discards the trace.
     fn apply(
         parameter: &Self::Parameter,
         epoch: u32,
         randomness: &Self::Randomness,
         message: &[u8; MESSAGE_LENGTH],
-    ) -> Result<Vec<u8>, Self::Error>;
+    ) -> Result<Vec<u8>, Self::Error> {
+        Self::apply_with_trace(parameter, epoch, randomness, message, &mut Vec::new())
+    }
 }
 
 pub mod aborting;

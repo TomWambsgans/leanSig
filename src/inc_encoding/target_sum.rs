@@ -1,5 +1,5 @@
 use super::IncomparableEncoding;
-use crate::{MESSAGE_LENGTH, symmetric::message_hash::MessageHash};
+use crate::{F, MESSAGE_LENGTH, symmetric::message_hash::MessageHash};
 use std::fmt::Debug;
 use thiserror::Error;
 
@@ -55,11 +55,12 @@ impl<MH: MessageHash, const TARGET_SUM: usize> IncomparableEncoding
         MH::rand(rng)
     }
 
-    fn encode(
+    fn encode_with_trace(
         parameter: &Self::Parameter,
         message: &[u8; MESSAGE_LENGTH],
         randomness: &Self::Randomness,
         epoch: u32,
+        trace_24: &mut Vec<([F; 24], [F; 24])>,
     ) -> Result<Vec<u8>, Self::Error> {
         const {
             // base and dimension must not be too large
@@ -74,8 +75,8 @@ impl<MH: MessageHash, const TARGET_SUM: usize> IncomparableEncoding
         }
 
         // apply the message hash first to get chunks
-        let chunks =
-            MH::apply(parameter, epoch, randomness, message).map_err(TargetSumError::HashError)?;
+        let chunks = MH::apply_with_trace(parameter, epoch, randomness, message, trace_24)
+            .map_err(TargetSumError::HashError)?;
         let sum: u32 = chunks.iter().map(|&x| x as u32).sum();
         // only output something if the chunks sum to the target sum
         if sum as usize == TARGET_SUM {

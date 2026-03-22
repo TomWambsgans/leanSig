@@ -16,7 +16,7 @@ use crate::hypercube::hypercube_find_layer;
 use crate::hypercube::hypercube_part_size;
 use crate::hypercube::map_to_vertex;
 use crate::poseidon1_24;
-use crate::symmetric::tweak_hash::poseidon::poseidon_compress;
+use crate::symmetric::tweak_hash::poseidon::poseidon_compress_with_trace;
 
 /// Function to make a list of field elements to a vertex in layers 0, ..., FINAL_LAYER
 /// of the hypercube {0,...,BASE-1}^DIMENSION.
@@ -136,11 +136,12 @@ where
         FieldArray(rng.random())
     }
 
-    fn apply(
+    fn apply_with_trace(
         parameter: &Self::Parameter,
         epoch: u32,
         randomness: &Self::Randomness,
         message: &[u8; MESSAGE_LENGTH],
+        trace_24: &mut Vec<([F; 24], [F; 24])>,
     ) -> Result<Vec<u8>, Infallible> {
         const {
             /// The width of the Poseidon1 permutation used.
@@ -227,7 +228,11 @@ where
                 .collect();
 
             let iteration_pos_output =
-                poseidon_compress::<F, _, 24, POS_OUTPUT_LEN_PER_INV_FE>(&perm, &combined_input);
+                poseidon_compress_with_trace::<_, _, 24, POS_OUTPUT_LEN_PER_INV_FE>(
+                    &perm,
+                    &combined_input,
+                    trace_24,
+                );
 
             pos_outputs[i * POS_OUTPUT_LEN_PER_INV_FE..(i + 1) * POS_OUTPUT_LEN_PER_INV_FE]
                 .copy_from_slice(&iteration_pos_output);

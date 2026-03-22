@@ -2,6 +2,7 @@ use rand::RngExt;
 
 use rayon::prelude::*;
 
+use crate::F;
 use crate::serialization::Serializable;
 use crate::symmetric::prf::Pseudorandom;
 
@@ -41,12 +42,24 @@ pub trait TweakableHash {
     /// Note: this is assumed to be distinct from the outputs of tree_tweak
     fn chain_tweak(epoch: u32, chain_index: u8, pos_in_chain: u8) -> Self::Tweak;
 
-    /// Applies the tweakable hash to parameter, tweak, and message.
+    /// Applies the tweakable hash to parameter, tweak, and message,
+    /// recording every Poseidon compression call into the appropriate trace vector.
+    fn apply_with_trace(
+        parameter: &Self::Parameter,
+        tweak: &Self::Tweak,
+        message: &[Self::Domain],
+        trace_16: &mut Vec<([F; 16], [F; 16])>,
+        trace_24: &mut Vec<([F; 24], [F; 24])>,
+    ) -> Self::Domain;
+
+    /// Convenience wrapper around [`Self::apply_with_trace`] that discards the traces.
     fn apply(
         parameter: &Self::Parameter,
         tweak: &Self::Tweak,
         message: &[Self::Domain],
-    ) -> Self::Domain;
+    ) -> Self::Domain {
+        Self::apply_with_trace(parameter, tweak, message, &mut Vec::new(), &mut Vec::new())
+    }
 
     /// Computes one layer of a Merkle tree by hashing pairs of children into parents.
     ///
@@ -103,14 +116,8 @@ pub trait TweakableHash {
         Self: Sized;
 }
 
-/// Function implementing hash chains, implemented over a tweakable hash function
-/// The chain is specific to an epoch `epoch`, and an index `chain_index`. All
-/// evaluations of the tweakable hash function use the given parameter `parameter`
-/// and tweaks determined by `epoch`, `chain_index`, and their position in the chain.
-/// We start walking the chain at position `start_pos_in_chain` with `start`,
-/// and then walk the chain for `steps` many steps. For example, walking two steps
-/// with `start = A` would mean we walk A -> B -> C, and then return C.
-#[allow(clippy::too_long_first_doc_paragraph)]
+/// Function implementing hash chains, implemented over a tweakable hash function.
+/// Convenience wrapper around [`chain_with_trace`] that discards the traces.
 pub fn chain<TH: TweakableHash>(
     parameter: &TH::Parameter,
     epoch: u32,
@@ -119,13 +126,43 @@ pub fn chain<TH: TweakableHash>(
     steps: usize,
     start: &TH::Domain,
 ) -> TH::Domain {
+    chain_with_trace::<TH>(
+        parameter,
+        epoch,
+        chain_index,
+        start_pos_in_chain,
+        steps,
+        start,
+        &mut Vec::new(),
+        &mut Vec::new(),
+    )
+}
+
+/// Function implementing hash chains, implemented over a tweakable hash function.
+/// The chain is specific to an epoch `epoch`, and an index `chain_index`. All
+/// evaluations of the tweakable hash function use the given parameter `parameter`
+/// and tweaks determined by `epoch`, `chain_index`, and their position in the chain.
+/// We start walking the chain at position `start_pos_in_chain` with `start`,
+/// and then walk the chain for `steps` many steps. For example, walking two steps
+/// with `start = A` would mean we walk A -> B -> C, and then return C.
+#[allow(clippy::too_long_first_doc_paragraph)]
+pub fn chain_with_trace<TH: TweakableHash>(
+    parameter: &TH::Parameter,
+    epoch: u32,
+    chain_index: u8,
+    start_pos_in_chain: u8,
+    steps: usize,
+    start: &TH::Domain,
+    trace_16: &mut Vec<([F; 16], [F; 16])>,
+    trace_24: &mut Vec<([F; 24], [F; 24])>,
+) -> TH::Domain {
     // keep track of what we have
     let mut current = *start;
 
     // otherwise, walk the right amount of steps
     for j in 0..steps {
         let tweak = TH::chain_tweak(epoch, chain_index, start_pos_in_chain + (j as u8) + 1u8);
-        current = TH::apply(parameter, &tweak, &[current]);
+        current = TH::apply_with_trace(parameter, &tweak, &[current], trace_16, trace_24);
     }
 
     // return where we are now

@@ -12,7 +12,7 @@ use crate::MESSAGE_LENGTH;
 use crate::TWEAK_SEPARATOR_FOR_MESSAGE_HASH;
 use crate::array::FieldArray;
 use crate::poseidon1_24;
-use crate::symmetric::tweak_hash::poseidon::poseidon_compress;
+use crate::symmetric::tweak_hash::poseidon::poseidon_compress_with_trace;
 
 /// Function to encode a message as an array of field elements
 pub fn encode_message<const MSG_LEN_FE: usize>(message: &[u8; MESSAGE_LENGTH]) -> [F; MSG_LEN_FE] {
@@ -94,7 +94,9 @@ fn decode_to_chunks<const DIMENSION: usize, const BASE: usize, const HASH_LEN_FE
 
 /// Hashes the public parameter, the epoch, the randomness, and the message using Poseidon1 over
 /// 24 field elements, in compression mode. (the total input length must be at most 24)
-pub(crate) fn poseidon_message_hash_fe<
+///
+/// Records the Poseidon compression call into the trace vector.
+pub(crate) fn poseidon_message_hash_fe_with_trace<
     const PARAMETER_LEN: usize,
     const RAND_LEN_FE: usize,
     const HASH_LEN_FE: usize,
@@ -105,6 +107,7 @@ pub(crate) fn poseidon_message_hash_fe<
     epoch: u32,
     randomness: &FieldArray<RAND_LEN_FE>,
     message: &[u8; MESSAGE_LENGTH],
+    trace_24: &mut Vec<([F; 24], [F; 24])>,
 ) -> [F; HASH_LEN_FE] {
     // Get the default, pre-configured Poseidon1 instance from Plonky3.
     let perm = poseidon1_24();
@@ -122,7 +125,7 @@ pub(crate) fn poseidon_message_hash_fe<
         .copied()
         .collect();
 
-    poseidon_compress::<F, _, 24, HASH_LEN_FE>(&perm, &combined_input_vec)
+    poseidon_compress_with_trace::<_, _, 24, HASH_LEN_FE>(&perm, &combined_input_vec, trace_24)
 }
 
 /// A message hash implemented using Poseidon1
@@ -180,11 +183,12 @@ where
         FieldArray(rng.random())
     }
 
-    fn apply(
+    fn apply_with_trace(
         parameter: &Self::Parameter,
         epoch: u32,
         randomness: &Self::Randomness,
         message: &[u8; MESSAGE_LENGTH],
+        trace_24: &mut Vec<([F; 24], [F; 24])>,
     ) -> Result<Vec<u8>, Infallible> {
         const {
             // Check that Poseidon of width 24 is enough
@@ -231,13 +235,13 @@ where
             );
         }
 
-        let hash_fe = poseidon_message_hash_fe::<
+        let hash_fe = poseidon_message_hash_fe_with_trace::<
             PARAMETER_LEN,
             RAND_LEN_FE,
             HASH_LEN_FE,
             TWEAK_LEN_FE,
             MSG_LEN_FE,
-        >(parameter, epoch, randomness, message);
+        >(parameter, epoch, randomness, message, trace_24);
 
         Ok(decode_to_chunks::<DIMENSION, BASE, HASH_LEN_FE>(&hash_fe).to_vec())
     }

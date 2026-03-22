@@ -134,6 +134,48 @@ where
         .expect("OUT_LEN is larger than permutation width")
 }
 
+/// Traced variant of [`poseidon_compress`].
+///
+/// Same computation, but also records the `(padded_input, full_compressed_state)` pair
+/// into the provided trace vector. Used during verification to capture every Poseidon
+/// invocation for external circuit verification.
+pub fn poseidon_compress_with_trace<R, P, const WIDTH: usize, const OUT_LEN: usize>(
+    perm: &P,
+    input: &[R],
+    trace: &mut Vec<([R; WIDTH], [R; WIDTH])>,
+) -> [R; OUT_LEN]
+where
+    R: PrimeCharacteristicRing + Copy,
+    P: CryptographicPermutation<[R; WIDTH]>,
+{
+    assert!(
+        input.len() >= OUT_LEN,
+        "Poseidon Compression: Input length must be at least output length."
+    );
+
+    // Copy the input into a fixed-width buffer, zero-padding unused elements if any.
+    let mut padded_input = [R::ZERO; WIDTH];
+    padded_input[..input.len()].copy_from_slice(input);
+
+    // Start with the input as the initial state.
+    let mut state = padded_input;
+
+    // Apply the Poseidon permutation in-place.
+    perm.permute_mut(&mut state);
+
+    // Feed-forward: Add the input back into the state element-wise.
+    for i in 0..WIDTH {
+        state[i] += padded_input[i];
+    }
+
+    trace.push((padded_input, state));
+
+    // Truncate and return the first `OUT_LEN` elements of the state.
+    state[..OUT_LEN]
+        .try_into()
+        .expect("OUT_LEN is larger than permutation width")
+}
+
 /// Computes a Poseidon-based domain separator by compressing an array of `u32`
 /// values using the Poseidon1 KoalaBear permutation with width 24.
 ///
@@ -161,6 +203,19 @@ fn poseidon_safe_domain_separator<const OUT_LEN: usize>(
     poseidon_compress::<F, _, MERGE_COMPRESSION_WIDTH, OUT_LEN>(perm, &input)
 }
 
+/// Convenience wrapper around [`poseidon_replacement_t_sponge_with_trace`] that discards the trace.
+fn poseidon_replacement_t_sponge<A, P, const WIDTH: usize, const OUT_LEN: usize>(
+    perm: &P,
+    capacity_value: &[A],
+    input: &[A],
+) -> [A; OUT_LEN]
+where
+    A: Algebra<F> + Copy,
+    P: CryptographicPermutation<[A; WIDTH]>,
+{
+    poseidon_replacement_t_sponge_with_trace(perm, capacity_value, input, &mut Vec::new())
+}
+
 /// Poseidon T-Sponge with "Replacement" Hash Function
 ///
 /// Absorbs an arbitrary-length input using the Poseidon sponge construction
@@ -170,6 +225,8 @@ fn poseidon_safe_domain_separator<const OUT_LEN: usize>(
 /// This function works generically over `A: Algebra<F>`, allowing it to process both:
 /// - Scalar fields,
 /// - Packed SIMD fields
+///
+/// Records every internal `poseidon_compress` call into the provided trace vector.
 ///
 /// ### Parameters
 /// - `WIDTH`: sponge state width.
@@ -182,20 +239,21 @@ fn poseidon_safe_domain_separator<const OUT_LEN: usize>(
 /// This follows the classic sponge structure:
 /// - **Absorption**: inputs are added chunk-by-chunk into the first `rate` elements of the state.
 /// - **Squeezing**: outputs are read from the first `rate` elements of the state, permuted as needed.
-/// 
+///
 /// ### "T-Sponge"
 /// This means we use Poseidon in compresson mode (not a permutation), at each step.
-/// 
+///
 /// ### "Replacement"
 /// This means we "replace" the first `rate` elements of the state with the input chunk, instead
 /// of adding (in the sense of finite field addition).
 ///
 /// ### Panics
 /// - If `capacity_value.len() >= WIDTH`
-fn poseidon_replacement_t_sponge<A, P, const WIDTH: usize, const OUT_LEN: usize>(
+fn poseidon_replacement_t_sponge_with_trace<A, P, const WIDTH: usize, const OUT_LEN: usize>(
     perm: &P,
     capacity_value: &[A],
     input: &[A],
+    trace: &mut Vec<([A; WIDTH], [A; WIDTH])>,
 ) -> [A; OUT_LEN]
 where
     A: Algebra<F> + Copy,
@@ -224,7 +282,7 @@ where
         for (s, &x) in state.iter_mut().take(rate).zip(chunk) {
             *s = x; // 'replacement' sponge
         }
-        state = poseidon_compress::<A, _, WIDTH, WIDTH>(perm, &state); // T-sponge
+        state = poseidon_compress_with_trace::<A, _, WIDTH, WIDTH>(perm, &state, trace); // T-sponge
     }
     // 2. Fill the remainder and pad with zeros.
     // NOTE: This zero-padding is secure for constant-size inputs but may be insecure elsewhere.
@@ -236,7 +294,7 @@ where
         for s in &mut state[num_remainder..rate] {
             *s = A::ZERO;
         }
-        state = poseidon_compress::<A, _, WIDTH, WIDTH>(perm, &state); // T-sponge
+        state = poseidon_compress_with_trace::<A, _, WIDTH, WIDTH>(perm, &state, trace); // T-sponge
     }
 
     // 3. squeeze
@@ -248,7 +306,7 @@ where
         out_index += chunk_size;
         if out_index < OUT_LEN {
             // no need to permute in last iteration, `state` is local variable
-            state = poseidon_compress::<A, _, WIDTH, WIDTH>(perm, &state); // T-sponge
+            state = poseidon_compress_with_trace::<A, _, WIDTH, WIDTH>(perm, &state, trace); // T-sponge
         }
     }
     out
@@ -304,10 +362,12 @@ impl<
         }
     }
 
-    fn apply(
+    fn apply_with_trace(
         parameter: &Self::Parameter,
         tweak: &Self::Tweak,
         message: &[Self::Domain],
+        trace_16: &mut Vec<([F; 16], [F; 16])>,
+        trace_24: &mut Vec<([F; 24], [F; 24])>,
     ) -> Self::Domain {
         const {
             assert!(
@@ -358,16 +418,19 @@ impl<
                 // Build input on stack: [parameter | tweak | message]
                 let mut combined_input = [F::ZERO; CHAIN_COMPRESSION_WIDTH];
                 combined_input[..PARAMETER_LEN].copy_from_slice(&parameter.0);
-                combined_input[PARAMETER_LEN..PARAMETER_LEN + TWEAK_LEN].copy_from_slice(&tweak_fe);
+                combined_input[PARAMETER_LEN..PARAMETER_LEN + TWEAK_LEN]
+                    .copy_from_slice(&tweak_fe);
                 combined_input[PARAMETER_LEN + TWEAK_LEN..PARAMETER_LEN + TWEAK_LEN + HASH_LEN]
                     .copy_from_slice(&single.0);
 
-                FieldArray(
-                    poseidon_compress::<F, _, CHAIN_COMPRESSION_WIDTH, HASH_LEN>(
-                        &perm,
-                        &combined_input,
-                    ),
-                )
+                FieldArray(poseidon_compress_with_trace::<
+                    _,
+                    _,
+                    CHAIN_COMPRESSION_WIDTH,
+                    HASH_LEN,
+                >(
+                    &perm, &combined_input, trace_16
+                ))
             }
 
             [left, right] => {
@@ -377,19 +440,22 @@ impl<
                 // Build input on stack: [parameter | tweak | left | right]
                 let mut combined_input = [F::ZERO; MERGE_COMPRESSION_WIDTH];
                 combined_input[..PARAMETER_LEN].copy_from_slice(&parameter.0);
-                combined_input[PARAMETER_LEN..PARAMETER_LEN + TWEAK_LEN].copy_from_slice(&tweak_fe);
+                combined_input[PARAMETER_LEN..PARAMETER_LEN + TWEAK_LEN]
+                    .copy_from_slice(&tweak_fe);
                 combined_input[PARAMETER_LEN + TWEAK_LEN..PARAMETER_LEN + TWEAK_LEN + HASH_LEN]
                     .copy_from_slice(&left.0);
                 combined_input[PARAMETER_LEN + TWEAK_LEN + HASH_LEN
                     ..PARAMETER_LEN + TWEAK_LEN + 2 * HASH_LEN]
                     .copy_from_slice(&right.0);
 
-                FieldArray(
-                    poseidon_compress::<F, _, MERGE_COMPRESSION_WIDTH, HASH_LEN>(
-                        &perm,
-                        &combined_input,
-                    ),
-                )
+                FieldArray(poseidon_compress_with_trace::<
+                    _,
+                    _,
+                    MERGE_COMPRESSION_WIDTH,
+                    HASH_LEN,
+                >(
+                    &perm, &combined_input, trace_24
+                ))
             }
 
             _ if message.len() > 2 => {
@@ -409,13 +475,16 @@ impl<
                     HASH_LEN as u32,
                 ];
                 let capacity_value = poseidon_safe_domain_separator::<CAPACITY>(&perm, &lengths);
-                FieldArray(poseidon_replacement_t_sponge::<F, _, MERGE_COMPRESSION_WIDTH, HASH_LEN>(
-                    &perm,
-                    &capacity_value,
-                    &combined_input,
-                ))
+                FieldArray(
+                    poseidon_replacement_t_sponge_with_trace::<_, _, MERGE_COMPRESSION_WIDTH, HASH_LEN>(
+                        &perm,
+                        &capacity_value,
+                        &combined_input,
+                        trace_24,
+                    ),
+                )
             }
-            _ => FieldArray([F::ONE; HASH_LEN]), // Unreachable case, added for safety
+            _ => FieldArray([F::ONE; HASH_LEN]),
         }
     }
 

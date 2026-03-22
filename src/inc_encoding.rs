@@ -1,6 +1,7 @@
 use rand::RngExt;
 use std::fmt::Debug;
 
+use crate::F;
 use crate::MESSAGE_LENGTH;
 use crate::serialization::Serializable;
 
@@ -35,16 +36,29 @@ pub trait IncomparableEncoding {
     /// Samples a randomness to be used for the encoding.
     fn rand<R: RngExt>(rng: &mut R) -> Self::Randomness;
 
-    /// Apply the incomparable encoding to a message.
+    /// Apply the incomparable encoding to a message, recording every
+    /// Poseidon-24 compression call into the trace vector.
+    ///
     /// It could happen that this fails. Otherwise,
     /// implementations must guarantee that the
     /// result is indeed a valid codeword.
+    fn encode_with_trace(
+        parameter: &Self::Parameter,
+        message: &[u8; MESSAGE_LENGTH],
+        randomness: &Self::Randomness,
+        epoch: u32,
+        trace_24: &mut Vec<([F; 24], [F; 24])>,
+    ) -> Result<Vec<u8>, Self::Error>;
+
+    /// Convenience wrapper around [`Self::encode_with_trace`] that discards the trace.
     fn encode(
         parameter: &Self::Parameter,
         message: &[u8; MESSAGE_LENGTH],
         randomness: &Self::Randomness,
         epoch: u32,
-    ) -> Result<Vec<u8>, Self::Error>;
+    ) -> Result<Vec<u8>, Self::Error> {
+        Self::encode_with_trace(parameter, message, randomness, epoch, &mut Vec::new())
+    }
 }
 
 pub mod target_sum;

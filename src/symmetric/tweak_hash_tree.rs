@@ -1,3 +1,4 @@
+use crate::F;
 use crate::serialization::Serializable;
 use crate::symmetric::tweak_hash::TweakableHash;
 use rand::rngs::StdRng;
@@ -601,6 +602,28 @@ pub fn hash_tree_verify<TH: TweakableHash>(
     leaf: &[TH::Domain],
     opening: &HashTreeOpening<TH>,
 ) -> bool {
+    hash_tree_verify_with_trace::<TH>(
+        parameter,
+        root,
+        position,
+        leaf,
+        opening,
+        &mut Vec::new(),
+        &mut Vec::new(),
+    )
+}
+
+/// Same Merkle path verification, but records every Poseidon compression call
+/// into the trace vectors.
+pub fn hash_tree_verify_with_trace<TH: TweakableHash>(
+    parameter: &TH::Parameter,
+    root: &TH::Domain,
+    position: u32,
+    leaf: &[TH::Domain],
+    opening: &HashTreeOpening<TH>,
+    trace_16: &mut Vec<([F; 16], [F; 16])>,
+    trace_24: &mut Vec<([F; 24], [F; 24])>,
+) -> bool {
     // given the length of the path, we know how
     // large the tree was. So we can check if the
     // position makes sense.
@@ -629,7 +652,7 @@ pub fn hash_tree_verify<TH: TweakableHash>(
 
     // first hash the leaf to get the node in the bottom layer
     let tweak = TH::tree_tweak(0, position);
-    let mut current_node = TH::apply(parameter, &tweak, leaf);
+    let mut current_node = TH::apply_with_trace(parameter, &tweak, leaf, trace_16, trace_24);
 
     // now reconstruct the root using the co-path
     let mut current_position = position;
@@ -649,7 +672,7 @@ pub fn hash_tree_verify<TH: TweakableHash>(
 
         // now hash to get the parent
         let tweak = TH::tree_tweak((l + 1) as u8, current_position);
-        current_node = TH::apply(parameter, &tweak, &children);
+        current_node = TH::apply_with_trace(parameter, &tweak, &children, trace_16, trace_24);
     }
 
     // Finally, check that recomputed root matches given root
