@@ -4,7 +4,7 @@ pub mod lifetime_2_to_the_32 {
     use crate::{
         inc_encoding::target_sum::TargetSumEncoding,
         signature::generalized_xmss::{
-            GeneralizedXMSSPublicKey, GeneralizedXMSSSignature, GeneralizedXMSSSignatureScheme,
+            GeneralizedXMSSPublicKey, GeneralizedXMSSSecretKey, GeneralizedXMSSSignature, GeneralizedXMSSSignatureScheme
         },
         symmetric::{
             message_hash::aborting::AbortingHypercubeMessageHash, prf::shake_to_field::ShakePRFtoF,
@@ -46,6 +46,7 @@ pub mod lifetime_2_to_the_32 {
     pub type SIGAbortingTargetSumLifetime32Dim64Base8 =
         GeneralizedXMSSSignatureScheme<PRF, IE, TH, LOG_LIFETIME>;
     pub type PubKeyAbortingTargetSumLifetime32Dim64Base8 = GeneralizedXMSSPublicKey<TH>;
+    pub type SecretKeyAbortingTargetSumLifetime32Dim64Base8 = GeneralizedXMSSSecretKey<PRF, IE, TH, LOG_LIFETIME>;
     pub type SigAbortingTargetSumLifetime32Dim64Base8 = GeneralizedXMSSSignature<IE, TH>;
 
     #[cfg(test)]
