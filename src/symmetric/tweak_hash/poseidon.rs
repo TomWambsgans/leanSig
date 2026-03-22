@@ -236,15 +236,17 @@ where
 /// - `input`: message to hash (any length).
 ///
 /// ### Sponge Construction
-/// This follows the classic sponge structure:
-/// - **Absorption**: inputs are added chunk-by-chunk into the first `rate` elements of the state.
-/// - **Squeezing**: outputs are read from the first `rate` elements of the state, permuted as needed.
+/// This follows the classic sponge structure with capacity-first layout:
+/// - The state is `[capacity | rate]`, i.e., the first elements hold the capacity,
+///   followed by the rate elements.
+/// - **Absorption**: inputs are written into the rate part of the state (`state[cap_len..]`).
+/// - **Squeezing**: outputs are read from the rate part of the state, permuted as needed.
 ///
 /// ### "T-Sponge"
 /// This means we use Poseidon in compresson mode (not a permutation), at each step.
 ///
 /// ### "Replacement"
-/// This means we "replace" the first `rate` elements of the state with the input chunk, instead
+/// This means we "replace" the rate elements of the state with the input chunk, instead
 /// of adding (in the sense of finite field addition).
 ///
 /// ### Panics
@@ -265,11 +267,12 @@ where
         capacity_value.len() < WIDTH,
         "Capacity length must be smaller than the state width."
     );
-    let rate = WIDTH - capacity_value.len();
+    let cap_len = capacity_value.len();
+    let rate = WIDTH - cap_len;
 
     // initialize
     let mut state = [A::ZERO; WIDTH];
-    state[rate..].copy_from_slice(capacity_value);
+    state[..cap_len].copy_from_slice(capacity_value);
 
     // Instead of converting the input to a vector, resizing and feeding the data into the
     // sponge, we instead fill in the vector from all chunks until we are left with a non
@@ -278,8 +281,8 @@ where
     // 1. fill in all full chunks and permute
     let mut it = input.chunks_exact(rate);
     for chunk in &mut it {
-        // add chunk elements into the first `rate` many elements of the `state`
-        for (s, &x) in state.iter_mut().take(rate).zip(chunk) {
+        // write chunk elements into the `rate` part of the state
+        for (s, &x) in state[cap_len..].iter_mut().zip(chunk) {
             *s = x; // 'replacement' sponge
         }
         state = poseidon_compress_with_trace::<A, _, WIDTH, WIDTH>(perm, &state, trace); // T-sponge
@@ -289,9 +292,9 @@ where
     if !it.remainder().is_empty() {
         let num_remainder = it.remainder().len();
         for (i, x) in it.remainder().iter().enumerate() {
-            state[i] = *x;
+            state[cap_len + i] = *x;
         }
-        for s in &mut state[num_remainder..rate] {
+        for s in &mut state[cap_len + num_remainder..] {
             *s = A::ZERO;
         }
         state = poseidon_compress_with_trace::<A, _, WIDTH, WIDTH>(perm, &state, trace); // T-sponge
@@ -302,7 +305,7 @@ where
     let mut out_index = 0;
     while out_index < OUT_LEN {
         let chunk_size = (OUT_LEN - out_index).min(rate);
-        out[out_index..out_index + chunk_size].copy_from_slice(&state[..chunk_size]);
+        out[out_index..out_index + chunk_size].copy_from_slice(&state[cap_len..cap_len + chunk_size]);
         out_index += chunk_size;
         if out_index < OUT_LEN {
             // no need to permute in last iteration, `state` is local variable
