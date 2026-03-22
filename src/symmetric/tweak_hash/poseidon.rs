@@ -251,6 +251,7 @@ where
 ///
 /// ### Panics
 /// - If `capacity_value.len() >= WIDTH`
+/// - If `OUT_LEN > capacity_value.len()` (we squeeze via the capacity part of the state, only 1 time)
 fn poseidon_replacement_t_sponge_with_trace<A, P, const WIDTH: usize, const OUT_LEN: usize>(
     perm: &P,
     capacity_value: &[A],
@@ -301,19 +302,11 @@ where
     }
 
     // 3. squeeze
-    let mut out = [A::ZERO; OUT_LEN];
-    let mut out_index = 0;
-    while out_index < OUT_LEN {
-        let chunk_size = (OUT_LEN - out_index).min(rate);
-        out[out_index..out_index + chunk_size]
-            .copy_from_slice(&state[cap_len..cap_len + chunk_size]);
-        out_index += chunk_size;
-        if out_index < OUT_LEN {
-            // no need to permute in last iteration, `state` is local variable
-            state = poseidon_compress_with_trace::<A, _, WIDTH, WIDTH>(perm, &state, trace); // T-sponge
-        }
-    }
-    out
+    assert!(
+        OUT_LEN <= cap_len,
+        "unimplemented: squeezing more elements than the capacity length is not supported yet"
+    );
+    state[..OUT_LEN].try_into().unwrap()
 }
 
 /// A tweakable hash function implemented using Poseidon1
@@ -440,8 +433,7 @@ impl<
                 // Build input on stack: [parameter | tweak | left | right]
                 let mut combined_input = [F::ZERO; MERGE_COMPRESSION_WIDTH];
                 combined_input[..PARAMETER_LEN].copy_from_slice(&parameter.0);
-                combined_input[PARAMETER_LEN..PARAMETER_LEN + TWEAK_LEN]
-                    .copy_from_slice(&tweak_fe);
+                combined_input[PARAMETER_LEN..PARAMETER_LEN + TWEAK_LEN].copy_from_slice(&tweak_fe);
                 combined_input[PARAMETER_LEN + TWEAK_LEN..PARAMETER_LEN + TWEAK_LEN + HASH_LEN]
                     .copy_from_slice(&left.0);
                 combined_input[PARAMETER_LEN + TWEAK_LEN + HASH_LEN
@@ -692,8 +684,8 @@ impl<
                             .copy_from_slice(packed_chain);
 
                         // Copy pre-packed parameter
-                        packed_input[chain_parameter_offset
-                            ..chain_parameter_offset + PARAMETER_LEN]
+                        packed_input
+                            [chain_parameter_offset..chain_parameter_offset + PARAMETER_LEN]
                             .copy_from_slice(&packed_parameter);
 
                         // Pack tweaks directly into destination
