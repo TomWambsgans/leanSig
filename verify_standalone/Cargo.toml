@@ -1,0 +1,10 @@
+[package]
+name = "verify-standalone"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+p3-field = { git = "https://github.com/Plonky3/Plonky3.git", rev = "b4dcde46" }
+p3-koala-bear = { git = "https://github.com/Plonky3/Plonky3.git", rev = "b4dcde46" }
+p3-symmetric = { git = "https://github.com/Plonky3/Plonky3.git", rev = "b4dcde46" }
+num-bigint = "0.4"
