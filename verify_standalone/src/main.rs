@@ -124,8 +124,8 @@ fn poseidon_replacement_t_sponge(
         state = poseidon_compress_24::<24>(perm, &state);
     }
 
-    // Squeeze (HASH_LEN <= rate, so one squeeze suffices)
-    std::array::from_fn(|i| state[cap_len + i])
+    // Squeeze from capacity part of the state
+    std::array::from_fn(|i| state[i])
 }
 
 // ─── Tweak encoding ─────────────────────────────────────────────────────────
