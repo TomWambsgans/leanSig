@@ -13,7 +13,7 @@ use crate::{
         prf::Pseudorandom,
         tweak_hash::{TweakableHash, chain, chain_with_trace},
         tweak_hash_tree::{
-            HashSubTree, HashTreeOpening, combined_path,
+            HashSubTree, HashTreeOpening,
             hash_tree_verify_with_trace,
         },
     },
@@ -224,10 +224,7 @@ pub struct GeneralizedXMSSSecretKey<
     parameter: TH::Parameter,
     activation_epoch: u64,
     num_active_epochs: u64,
-    top_tree: HashSubTree<TH>,
-    left_bottom_tree_index: u64,
-    left_bottom_tree: HashSubTree<TH>,
-    right_bottom_tree: HashSubTree<TH>,
+    tree: HashSubTree<TH>,
     _encoding_type: PhantomData<IE>,
 }
 
@@ -240,61 +237,31 @@ impl<PRF: Pseudorandom, IE: IncomparableEncoding, TH: TweakableHash, const LOG_L
     }
 
     fn ssz_bytes_len(&self) -> usize {
-        // Computes the SSZ encoded length.
-        // Format: Fields interleaved in declaration order with offsets for variable fields
-
-        // Fixed-length fields (using u64 for platform independence)
         let prf_key_size = self.prf_key.ssz_bytes_len();
         let parameter_size = self.parameter.ssz_bytes_len();
-        let activation_epoch_size = 8; // u64
-        let num_active_epochs_size = 8; // u64
-
-        // Variable fields need 4-byte offsets each
-        let offset_size = 4;
-        let top_tree_size = self.top_tree.ssz_bytes_len();
-
-        let left_bottom_tree_index_size = 8; // u64
-        let left_bottom_tree_size = self.left_bottom_tree.ssz_bytes_len();
-        let right_bottom_tree_size = self.right_bottom_tree.ssz_bytes_len();
+        let tree_size = self.tree.ssz_bytes_len();
 
         prf_key_size
             + parameter_size
-            + activation_epoch_size
-            + num_active_epochs_size
-            + offset_size // top_tree offset
-            + left_bottom_tree_index_size
-            + offset_size // left_bottom_tree offset
-            + offset_size // right_bottom_tree offset
-            + top_tree_size
-            + left_bottom_tree_size
-            + right_bottom_tree_size
+            + 8 // activation_epoch
+            + 8 // num_active_epochs
+            + 4 // tree offset
+            + tree_size
     }
 
     fn ssz_append(&self, buf: &mut Vec<u8>) {
-        // Appends the SSZ encoding to the buffer.
-        //
-        // SSZ Container encoding with fields interleaved in declaration order:
+        // SSZ Container encoding with fields in declaration order:
         // - Field 1 (prf_key): fixed → write data
         // - Field 2 (parameter): fixed → write data
         // - Field 3 (activation_epoch): fixed → write data
         // - Field 4 (num_active_epochs): fixed → write data
-        // - Field 5 (top_tree): variable → write offset
-        // - Field 6 (left_bottom_tree_index): fixed → write data
-        // - Field 7 (left_bottom_tree): variable → write offset
-        // - Field 8 (right_bottom_tree): variable → write offset
+        // - Field 5 (tree): variable → write offset
         //
-        // Then write variable data in order: top_tree, left_bottom_tree, right_bottom_tree
+        // Then write variable data: tree
 
-        // Calculate sizes of fixed fields
         let prf_key_size = self.prf_key.ssz_bytes_len();
         let parameter_size = self.parameter.ssz_bytes_len();
-
-        // Calculate start of variable data
-        let fixed_size = prf_key_size + parameter_size + 8 + 8 + 4 + 8 + 4 + 4;
-
-        let offset_top_tree = fixed_size;
-        let offset_left_bottom = offset_top_tree + self.top_tree.ssz_bytes_len();
-        let offset_right_bottom = offset_left_bottom + self.left_bottom_tree.ssz_bytes_len();
+        let fixed_size = prf_key_size + parameter_size + 8 + 8 + 4;
 
         // 1. Encode fixed field: prf_key
         self.prf_key.ssz_append(buf);
@@ -308,22 +275,11 @@ impl<PRF: Pseudorandom, IE: IncomparableEncoding, TH: TweakableHash, const LOG_L
         // 4. Encode fixed field: num_active_epochs (u64)
         buf.extend_from_slice(&self.num_active_epochs.to_le_bytes());
 
-        // 5. Encode offset for first variable field: top_tree
-        buf.extend_from_slice(&(offset_top_tree as u32).to_le_bytes());
+        // 5. Encode offset for variable field: tree
+        buf.extend_from_slice(&(fixed_size as u32).to_le_bytes());
 
-        // 6. Encode fixed field: left_bottom_tree_index (u64)
-        buf.extend_from_slice(&self.left_bottom_tree_index.to_le_bytes());
-
-        // 7. Encode offset for second variable field: left_bottom_tree
-        buf.extend_from_slice(&(offset_left_bottom as u32).to_le_bytes());
-
-        // 8. Encode offset for third variable field: right_bottom_tree
-        buf.extend_from_slice(&(offset_right_bottom as u32).to_le_bytes());
-
-        // 9. Encode variable data in order
-        self.top_tree.ssz_append(buf);
-        self.left_bottom_tree.ssz_append(buf);
-        self.right_bottom_tree.ssz_append(buf);
+        // 6. Encode variable data: tree
+        self.tree.ssz_append(buf);
     }
 }
 
@@ -334,22 +290,7 @@ impl<PRF: Pseudorandom, IE: IncomparableEncoding, TH: TweakableHash, const LOG_L
         false
     }
 
-    #[allow(clippy::too_many_lines)]
     fn from_ssz_bytes(bytes: &[u8]) -> Result<Self, DecodeError> {
-        // Decodes a generalized XMSS secret key from SSZ bytes.
-        //
-        // Fields are interleaved:
-        // - prf_key
-        // - parameter
-        // - activation_epoch
-        // - num_active_epochs
-        // - offset_top_tree
-        // - left_bottom_tree_index
-        // - offset_left_bottom
-        // - offset_right_bottom
-        // - variable data
-
-        // Get fixed sizes for prf_key and parameter
         let prf_key_size = if <PRF::Key as Encode>::is_ssz_fixed_len() {
             <PRF::Key as Encode>::ssz_fixed_len()
         } else {
@@ -366,8 +307,8 @@ impl<PRF: Pseudorandom, IE: IncomparableEncoding, TH: TweakableHash, const LOG_L
             ));
         };
 
-        // Minimum size: prf_key + parameter + 3×u64 (24) + 3×offset (12)
-        let min_fixed_size = prf_key_size + parameter_size + 24 + 12;
+        // Minimum size: prf_key + parameter + 2×u64 (16) + 1×offset (4)
+        let min_fixed_size = prf_key_size + parameter_size + 16 + 4;
         if bytes.len() < min_fixed_size {
             return Err(DecodeError::InvalidByteLength {
                 len: bytes.len(),
@@ -375,7 +316,6 @@ impl<PRF: Pseudorandom, IE: IncomparableEncoding, TH: TweakableHash, const LOG_L
             });
         }
 
-        // Track current position
         let mut pos = 0;
 
         // 1. Decode fixed field: prf_key
@@ -406,8 +346,8 @@ impl<PRF: Pseudorandom, IE: IncomparableEncoding, TH: TweakableHash, const LOG_L
             })?);
         pos += 8;
 
-        // 5. Read offset for first variable field: top_tree
-        let offset_top_tree = u32::from_le_bytes(bytes[pos..pos + 4].try_into().map_err(|_| {
+        // 5. Read offset for variable field: tree
+        let offset_tree = u32::from_le_bytes(bytes[pos..pos + 4].try_into().map_err(|_| {
             DecodeError::InvalidByteLength {
                 len: bytes.len(),
                 expected: pos + 4,
@@ -415,77 +355,22 @@ impl<PRF: Pseudorandom, IE: IncomparableEncoding, TH: TweakableHash, const LOG_L
         })?) as usize;
         pos += 4;
 
-        // 6. Decode fixed field: left_bottom_tree_index (u64)
-        let left_bottom_tree_index =
-            u64::from_le_bytes(bytes[pos..pos + 8].try_into().map_err(|_| {
-                DecodeError::InvalidByteLength {
-                    len: bytes.len(),
-                    expected: pos + 8,
-                }
-            })?);
-        pos += 8;
-
-        // 7. Read offset for second variable field: left_bottom_tree
-        let offset_left_bottom =
-            u32::from_le_bytes(bytes[pos..pos + 4].try_into().map_err(|_| {
-                DecodeError::InvalidByteLength {
-                    len: bytes.len(),
-                    expected: pos + 4,
-                }
-            })?) as usize;
-        pos += 4;
-
-        // 8. Read offset for third variable field: right_bottom_tree
-        let offset_right_bottom =
-            u32::from_le_bytes(bytes[pos..pos + 4].try_into().map_err(|_| {
-                DecodeError::InvalidByteLength {
-                    len: bytes.len(),
-                    expected: pos + 4,
-                }
-            })?) as usize;
-        pos += 4;
-
-        // Validate that fixed part ends at first offset
-        if pos != offset_top_tree {
+        if pos != offset_tree {
             return Err(DecodeError::InvalidByteLength {
                 len: pos,
-                expected: offset_top_tree,
+                expected: offset_tree,
             });
         }
 
-        // Panic safety: Ensure offsets are monotonic and within bounds
-        //
-        // This prevents panic when creating slices below
-        // Verify: offset_top <= offset_left <= offset_right <= bytes.len()
-        if offset_top_tree > offset_left_bottom
-            || offset_left_bottom > offset_right_bottom
-            || offset_right_bottom > bytes.len()
-        {
-            return Err(DecodeError::BytesInvalid(format!(
-                "Invalid variable offsets: top={} left={} right={} len={}",
-                offset_top_tree,
-                offset_left_bottom,
-                offset_right_bottom,
-                bytes.len()
-            )));
-        }
-
-        // 9. Decode variable fields (now safe after bounds check)
-        let top_tree =
-            HashSubTree::<TH>::from_ssz_bytes(&bytes[offset_top_tree..offset_left_bottom])?;
-        let left_bottom_tree =
-            HashSubTree::<TH>::from_ssz_bytes(&bytes[offset_left_bottom..offset_right_bottom])?;
-        let right_bottom_tree = HashSubTree::<TH>::from_ssz_bytes(&bytes[offset_right_bottom..])?;
+        // 6. Decode variable field: tree
+        let tree = HashSubTree::<TH>::from_ssz_bytes(&bytes[offset_tree..])?;
 
         Ok(Self {
             prf_key,
             parameter,
             activation_epoch,
             num_active_epochs,
-            top_tree,
-            left_bottom_tree_index,
-            left_bottom_tree,
-            right_bottom_tree,
+            tree,
             _encoding_type: PhantomData,
         })
     }
@@ -505,137 +390,14 @@ where
     }
 
     fn get_prepared_interval(&self) -> std::ops::Range<u64> {
-        // the key is prepared for all epochs covered by the left and right bottom tree
-        // and each bottom tree covers exactly 2^{LOG_LIFETIME / 2} leafs
-        let leafs_per_bottom_tree = 1u64 << (LOG_LIFETIME / 2);
-        let start = self.left_bottom_tree_index * leafs_per_bottom_tree;
-        let end = start + (2 * leafs_per_bottom_tree);
-        start..end
+        self.get_activation_interval()
     }
 
     fn advance_preparation(&mut self) {
-        // First, check if advancing is possible by comparing to activation interval.
-        let leafs_per_bottom_tree = 1u64 << (LOG_LIFETIME / 2);
-        let next_prepared_end_epoch =
-            self.left_bottom_tree_index * leafs_per_bottom_tree + 3 * leafs_per_bottom_tree;
-        if next_prepared_end_epoch > self.get_activation_interval().end {
-            return;
-        }
-
-        // We compute the new right bottom subtree (using the helper function bottom_tree_from_prf_key)
-        let new_right_bottom_tree = bottom_tree_from_prf_key::<PRF, IE, TH, LOG_LIFETIME>(
-            &self.prf_key,
-            self.left_bottom_tree_index + 2,
-            &self.parameter,
-        );
-
-        // The bottom tree that was previously right should now be left.
-        // So, we move the right bottom subtree to the left one and update our index.
-        // We also write the new right bottom tree into the right bottom tree field.
-        // Note that once the function terminates, the old left bottom tree is dropped
-        // from memory. So, at any point in time, we have at most 4 trees in memory,
-        // namely, the three bottom trees (two current, one new) and the top tree.
-        self.left_bottom_tree =
-            std::mem::replace(&mut self.right_bottom_tree, new_right_bottom_tree);
-        self.left_bottom_tree_index += 1;
+        // no-op: the full tree for the activation interval is stored
     }
 }
 
-/// Helper function to take a desired activation time (given by start and duration)
-/// and potentially increase it, so that, for C = 1 << (LOG_LIFETIME/2).
-///     1. the new duration is a multiple of C
-///     2. the new duration is at least 2 * C
-///     3. the new activation time starts at a multiple of C
-///     4. the new activation interval is contained in [0...C^2) = [0,..LIFETIME).
-///     5. the new interval contains the desired interval.
-///
-/// The returned result is a pair (start, excl_end) of integers, such that the new
-/// activation interval is given by [start * C , excl_end * C).
-fn expand_activation_time<const LOG_LIFETIME: usize>(
-    desired_activation_epoch: usize,
-    desired_num_active_epochs: usize,
-) -> (usize, usize) {
-    let lifetime = 1usize << LOG_LIFETIME;
-    let c = 1usize << (LOG_LIFETIME / 2);
-    // c_mask has the form 1...10...0, with LOG_LIFETIME / 2 many 0's.
-    let c_mask = !(c - 1);
-
-    let desired_start = desired_activation_epoch;
-    let desired_end = desired_activation_epoch + desired_num_active_epochs;
-
-    // 1. Start by aligning the *start* downward to a multiple of C.
-    // we can do that by bitwise and with c_mask.
-    let mut start = desired_start & c_mask;
-
-    // 2. Round the *end* upward to a multiple of C.
-    // This guarantees the original interval is fully contained.
-    let mut end = (desired_end + c - 1) & c_mask;
-
-    // 3. Enforce minimum duration of 2*C.
-    if end - start < 2 * c {
-        end = start + 2 * c;
-    }
-
-    // 4. If the new interval exceeds lifetime, shift it left to fit inside [0, lifetime)
-    if end > lifetime {
-        let duration = end - start;
-        if duration > lifetime {
-            // Pathological: expanded interval exceeds lifetime
-            start = 0;
-            end = lifetime;
-        } else {
-            end = lifetime;
-            start = (lifetime - duration) & c_mask;
-        }
-    }
-
-    // now divide by c to get what we want
-    start >>= LOG_LIFETIME / 2;
-    end >>= LOG_LIFETIME / 2;
-
-    (start, end)
-}
-
-/// Helper function to compute a bottom tree from the PRF key. The PRF key is used to re-generate
-/// the secret keys, then the public keys are generated and hashed to obtain the leafs of the
-/// bottom tree. Then the bottom tree is computed.
-fn bottom_tree_from_prf_key<
-    PRF: Pseudorandom,
-    IE: IncomparableEncoding,
-    TH: TweakableHash,
-    const LOG_LIFETIME: usize,
->(
-    prf_key: &PRF::Key,
-    bottom_tree_index: u64,
-    parameter: &TH::Parameter,
-) -> HashSubTree<TH>
-where
-    PRF::Domain: Into<TH::Domain>,
-    PRF::Randomness: Into<IE::Randomness>,
-    TH::Parameter: Into<IE::Parameter>,
-{
-    let leafs_per_bottom_tree = 1u64 << (LOG_LIFETIME / 2);
-    let num_chains = IE::DIMENSION;
-    let chain_length = IE::BASE;
-
-    // the range of epochs covered by that bottom tree
-    let epoch_start = bottom_tree_index * leafs_per_bottom_tree;
-    let epochs: Vec<u32> = (epoch_start..epoch_start + leafs_per_bottom_tree)
-        .map(|e| e as u32)
-        .collect();
-
-    // Compute chain ends for all epochs.
-    let chain_ends_hashes =
-        TH::compute_tree_leaves::<PRF>(prf_key, parameter, &epochs, num_chains, chain_length);
-
-    // now that we have the hashes of all chain ends (= leafs of our tree), we can compute the bottom tree
-    HashSubTree::new_bottom_tree(
-        LOG_LIFETIME,
-        bottom_tree_index as usize,
-        parameter,
-        chain_ends_hashes,
-    )
-}
 
 impl<
     PRF: Pseudorandom,
@@ -672,47 +434,17 @@ where
                 IE::DIMENSION <= 1 << 8,
                 "Generalized XMSS: Encoding dimension too large, must be at most 2^8"
             );
-
-            // LOG_LIFETIME needs to be even, so that we can use the top-bottom tree approach
-            assert!(
-                LOG_LIFETIME.is_multiple_of(2),
-                "Generalized XMSS: LOG_LIFETIME must be multiple of two"
-            );
         }
 
         // checks for `activation_epoch` and `num_active_epochs`
         assert!(
+            num_active_epochs >= 1,
+            "Key gen: `num_active_epochs` must be at least 1"
+        );
+        assert!(
             activation_epoch + num_active_epochs <= Self::LIFETIME as usize,
             "Key gen: `activation_epoch` and `num_active_epochs` are invalid for this lifetime"
         );
-
-        // Note: this implementation uses the top-bottom tree approach, which is as follows:
-        //
-        // We envision that the full Merkle tree into one top tree and `sqrt(LIFETIME)` bottom trees.
-        // The top tree contains the root and the `LOG_LIFETIME/2` layers below it. This top tree has
-        // `sqrt(LIFETIME)` many leafs (but can be sparse and have less). For each leaf that exists,
-        // this leaf is the roof of a bottom tree. Thus, there are at most `sqrt(LIFETIME)` bottom trees,
-        // each having `sqrt(LIFETIME)` leafs. We now restrict increase the activation time to be a
-        // multiple of `sqrt(LIFETIME)` that aligns with these bottom trees, and is at least of length
-        // `2*sqrt(LIFETIME)` so that we have at least two bottom trees.
-        //
-        // Our invariant is that the secret key always stores the full top tree and two consecutive
-        // bottom trees. The secret key can then sign epochs contained in the leafs of these two
-        // consecutive bottom trees, and we provide an update function that re-computes the next bottom
-        // tree and drops the older of the two current ones (function advance_preparation).
-        //
-        // During key generation, we first generate all bottom trees and store their roots, then we
-        // generate the top tree just from their roots.
-
-        // before we do anything, we expand our activation range so that the
-        // top-bottom tree approach can be applied cleanly.
-        let leafs_per_bottom_tree = 1 << (LOG_LIFETIME / 2);
-        let (start_bottom_tree_index, end_bottom_tree_index) =
-            expand_activation_time::<LOG_LIFETIME>(activation_epoch, num_active_epochs);
-        let num_bottom_trees = end_bottom_tree_index - start_bottom_tree_index;
-        assert!(num_bottom_trees >= 2);
-        let activation_epoch = start_bottom_tree_index * leafs_per_bottom_tree;
-        let num_active_epochs = num_bottom_trees * leafs_per_bottom_tree;
 
         // we need a random parameter to be used for the tweakable hash
         let parameter = TH::rand_parameter(rng);
@@ -720,53 +452,26 @@ where
         // we need a PRF key to generate our list of actual secret keys
         let prf_key = PRF::key_gen(rng);
 
-        // first, we build all bottom trees and keep track of their root. We treat the first two
-        // bottom trees differently, as we want to keep them in our key. While building the bottom
-        // trees, we generate all hash chains using our PRF key, and hash their ends to get the
-        // leafs of our bottom trees. This is done in `bottom_tree_from_prf_key`.
-        let mut roots_of_bottom_trees = Vec::with_capacity(num_bottom_trees);
+        // compute the tree leaves for all epochs in the activation range
+        let num_chains = IE::DIMENSION;
+        let chain_length = IE::BASE;
+        let epochs: Vec<u32> = (activation_epoch..activation_epoch + num_active_epochs)
+            .map(|e| e as u32)
+            .collect();
 
-        let left_bottom_tree_index = start_bottom_tree_index as u64;
-        let left_bottom_tree = bottom_tree_from_prf_key::<PRF, IE, TH, LOG_LIFETIME>(
-            &prf_key,
-            left_bottom_tree_index,
-            &parameter,
-        );
-        roots_of_bottom_trees.push(left_bottom_tree.root());
+        let leaf_hashes =
+            TH::compute_tree_leaves::<PRF>(&prf_key, &parameter, &epochs, num_chains, chain_length);
 
-        let right_bottom_tree_index = (start_bottom_tree_index + 1) as u64;
-        let right_bottom_tree = bottom_tree_from_prf_key::<PRF, IE, TH, LOG_LIFETIME>(
-            &prf_key,
-            right_bottom_tree_index,
-            &parameter,
-        );
-        roots_of_bottom_trees.push(right_bottom_tree.root());
-
-        // the rest of the bottom trees in parallel
-        roots_of_bottom_trees.extend(
-            (start_bottom_tree_index + 2..end_bottom_tree_index)
-                .into_par_iter()
-                .map(|bottom_tree_index| {
-                    let bottom_tree = bottom_tree_from_prf_key::<PRF, IE, TH, LOG_LIFETIME>(
-                        &prf_key,
-                        bottom_tree_index as u64,
-                        &parameter,
-                    );
-                    bottom_tree.root()
-                })
-                .collect::<Vec<_>>(), // note: roots are in the correct order.
-        );
-
-        // second, we build the top tree, which has the roots of our bottom trees
-        // as leafs. the root of it will be our public key.
-        let top_tree = HashSubTree::new_top_tree(
+        // build the full sparse tree for the activation range
+        let tree = HashSubTree::new_subtree(
             rng,
+            0, // lowest_layer = 0 (full tree from leaves)
             LOG_LIFETIME,
-            start_bottom_tree_index,
+            activation_epoch,
             &parameter,
-            roots_of_bottom_trees,
+            leaf_hashes,
         );
-        let root = top_tree.root();
+        let root = tree.root();
 
         // assemble public key and secret key
         let pk = GeneralizedXMSSPublicKey { root, parameter };
@@ -775,10 +480,7 @@ where
             parameter,
             activation_epoch: activation_epoch as u64,
             num_active_epochs: num_active_epochs as u64,
-            top_tree,
-            left_bottom_tree_index,
-            left_bottom_tree,
-            right_bottom_tree,
+            tree,
             _encoding_type: PhantomData,
         };
 
@@ -797,24 +499,10 @@ where
             "Signing: key not active during this epoch."
         );
 
-        // check that we are already prepared for this epoch
-        assert!(
-            sk.get_prepared_interval().contains(&(epoch as u64)),
-            "Signing: key not yet prepared for this epoch, try calling sk.advance_preparation."
-        );
-
         // first component of the signature is the Merkle path that
         // opens the one-time pk for that epoch, where the one-time pk
         // will be recomputed by the verifier from the signature.
-        let leafs_per_bottom_tree = 1u64 << (LOG_LIFETIME / 2);
-        let boundary_between_bottom_trees =
-            (sk.left_bottom_tree_index * leafs_per_bottom_tree + leafs_per_bottom_tree) as u32;
-        let bottom_tree = if epoch < boundary_between_bottom_trees {
-            &sk.left_bottom_tree
-        } else {
-            &sk.right_bottom_tree
-        };
-        let path = combined_path(&sk.top_tree, bottom_tree, epoch);
+        let path = sk.tree.path(epoch);
 
         // now, we need to encode our message using the incomparable encoding.
         // we retry until we get a valid codeword, or until we give up.
@@ -1090,21 +778,9 @@ mod tests {
         // we sign the same (epoch, message) pair twice (which users of this code should not do)
         // and ensure that it produces the same randomness for the signature.
         let mut rng = rand::rng();
-        let (_pk, mut sk) = Sig::key_gen(&mut rng, 0, 1 << LOG_LIFETIME);
+        let (_pk, sk) = Sig::key_gen(&mut rng, 0, 1 << LOG_LIFETIME);
         let message = rng.random();
         let epoch = 29;
-
-        // prepare key for epoch
-        let mut iterations = 0;
-        while !sk.get_prepared_interval().contains(&(epoch as u64)) && iterations < epoch {
-            sk.advance_preparation();
-            iterations += 1;
-        }
-        assert!(
-            sk.get_prepared_interval().contains(&(epoch as u64)),
-            "Did not even try signing, failed to advance key preparation to desired epoch {:?}.",
-            epoch
-        );
 
         let sig1 = Sig::sign(&sk, epoch, &message).unwrap();
         let sig2 = Sig::sign(&sk, epoch, &message).unwrap();
@@ -1158,39 +834,6 @@ mod tests {
         test_signature_scheme_correctness::<Sig>(19, 0, Sig::LIFETIME as usize);
         test_signature_scheme_correctness::<Sig>(0, 0, Sig::LIFETIME as usize);
         test_signature_scheme_correctness::<Sig>(11, 0, Sig::LIFETIME as usize);
-    }
-
-    #[test]
-    pub fn test_expand_activation_time() {
-        const LOG_LIFETIME: usize = 4;
-
-        // no padding needed
-        let (start, end_excl) = expand_activation_time::<LOG_LIFETIME>(0, 8);
-        assert!((start == 0) && (end_excl == 2));
-
-        // no padding needed in principle, but is extended to minimum duration of two bottom trees
-        let (start, end_excl) = expand_activation_time::<LOG_LIFETIME>(0, 4);
-        assert!((start == 0) && (end_excl == 2));
-
-        // simple padding needed
-        let (start, end_excl) = expand_activation_time::<LOG_LIFETIME>(0, 7);
-        assert!((start == 0) && (end_excl == 2));
-
-        // simple padding needed, and extended to minimum duration of two bottom trees
-        let (start, end_excl) = expand_activation_time::<LOG_LIFETIME>(0, 3);
-        assert!((start == 0) && (end_excl == 2));
-
-        // padding on both sides needed
-        let (start, end_excl) = expand_activation_time::<LOG_LIFETIME>(1, 8);
-        assert!((start == 0) && (end_excl == 3));
-
-        // padding only in the end needed
-        let (start, end_excl) = expand_activation_time::<LOG_LIFETIME>(8, 5);
-        assert!((start == 2) && (end_excl == 4));
-
-        // large padding to the left needed because of two bottom trees constraint
-        let (start, end_excl) = expand_activation_time::<LOG_LIFETIME>(12, 2);
-        assert!((start == 2) && (end_excl == 4));
     }
 
     #[test]
@@ -1252,7 +895,7 @@ mod tests {
         // Calculate fixed field sizes
         let prf_key_size = sk2.prf_key.ssz_bytes_len();
         let param_size = sk2.parameter.ssz_bytes_len();
-        let fixed_part_size = prf_key_size + param_size + 8 + 8 + 4 + 8 + 4 + 4;
+        let fixed_part_size = prf_key_size + param_size + 8 + 8 + 4;
         // Verify minimum size includes all fixed fields
         assert!(sk_encoded.len() >= fixed_part_size);
         // Read activation epoch value from fixed position
@@ -1368,15 +1011,12 @@ mod tests {
 
         // Calculate the exact size of the "Fixed Part" of the SecretKey container.
         //
-        // Layout: [PRF] [Param] [ActEpoch] [NumActive] [OffTop] [LeftIdx] [OffLeft] [OffRight]
+        // Layout: [PRF] [Param] [ActEpoch] [NumActive] [OffTree]
         let fixed_part_len = prf_key_size
             + param_size
             + u64_size // activation_epoch
             + u64_size // num_active_epochs
-            + offset_size // offset_top_tree
-            + u64_size // left_bottom_tree_index
-            + offset_size // offset_left_bottom
-            + offset_size; // offset_right_bottom
+            + offset_size; // offset_tree
 
         // Helper: Error Verifier
         fn assert_bytes_invalid<T>(result: Result<T, DecodeError>, expected_msg_part: &str) {
@@ -1453,16 +1093,15 @@ mod tests {
             assert_bytes_invalid(result, "len=100");
         }
 
-        // SCENARIO 3: Secret Key with Interleaved Offset Violation
+        // SCENARIO 3: Secret Key with Invalid Offset
         //
-        // Structure: Fixed Fields interleaved with 3 Variable Offsets (top, left, right)
-        // Malicious Input: offset_left < offset_top (Reversed variable sections)
+        // Structure: Fixed Fields with 1 Variable Offset (tree)
+        // Malicious Input: offset doesn't match fixed_part_len
         {
             let mut encoded = vec![0u8; fixed_part_len + 100];
             let mut pos = 0;
 
             // 1. Write Fixed Fields: PRF Key
-            // We write actual valid PRF key bytes
             let mut prf_buf = Vec::new();
             dummy_prf_key.ssz_append(&mut prf_buf);
             encoded[pos..pos + prf_key_size].copy_from_slice(&prf_buf);
@@ -1480,27 +1119,12 @@ mod tests {
             // 4. Write Fixed Fields: Num Active Epochs (u64)
             pos += 8;
 
-            // 5. Write [Offset Top Tree]
-            // Should point to the end of the fixed part.
-            encoded[pos..pos + 4].copy_from_slice(&(fixed_part_len as u32).to_le_bytes());
-            pos += 4;
-
-            // 6. Write Fixed Fields: Left Bottom Tree Index (u64)
-            pos += 8;
-
-            // 7. Write [Offset Left Bottom Tree] -> MALICIOUS!
-            // We set it to 10.
-            // Since 10 < fixed_part_len, this offset comes *before* the Top Tree offset.
-            // This would cause `bytes[offset_top..offset_left]` to panic.
+            // 5. Write [Offset Tree] -> MALICIOUS!
+            // We set it to 10, which doesn't match fixed_part_len.
             encoded[pos..pos + 4].copy_from_slice(&10u32.to_le_bytes());
-            pos += 4;
-
-            // 8. Write [Offset Right Bottom Tree]
-            // Set to valid relative location to ensure we don't fail on the third offset check first.
-            encoded[pos..pos + 4].copy_from_slice(&((fixed_part_len + 50) as u32).to_le_bytes());
 
             let result = <Sig as SignatureScheme>::SecretKey::from_ssz_bytes(&encoded);
-            assert_bytes_invalid(result, "Invalid variable offsets");
+            assert!(result.is_err());
         }
     }
 
@@ -1598,37 +1222,6 @@ mod tests {
     }
 
     proptest! {
-        #[test]
-        fn proptest_expand_activation_time_invariants(
-            desired_start in 0usize..256,
-            desired_duration in 1usize..256
-        ) {
-            const LOG_LIFETIME: usize = 8;
-            const C: usize = 1 << (LOG_LIFETIME / 2);
-            const LIFETIME: usize = 1 << LOG_LIFETIME;
-
-            let desired_end = (desired_start + desired_duration).min(LIFETIME);
-
-            let (start, end) = expand_activation_time::<LOG_LIFETIME>(desired_start, desired_duration);
-
-            let actual_start = start * C;
-            let actual_end = end * C;
-
-            // check minimum duration of 2 bottom trees (each tree has C leaves)
-            prop_assert!(actual_end - actual_start >= 2 * C);
-
-            // check result fits within lifetime
-            prop_assert!(actual_end <= LIFETIME);
-
-            // check result contains the desired interval
-            prop_assert!(actual_start <= desired_start);
-            prop_assert!(actual_end >= desired_end);
-
-            // check determinism by calling twice
-            let (start2, end2) = expand_activation_time::<LOG_LIFETIME>(desired_start, desired_duration);
-            prop_assert_eq!((start, end), (start2, end2));
-        }
-
         #[test]
         fn proptest_ssz_public_key_roundtrip_and_determinism(
             root_values in prop::collection::vec(0u32..F::ORDER_U32, 7),
