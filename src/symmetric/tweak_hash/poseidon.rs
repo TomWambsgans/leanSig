@@ -251,7 +251,6 @@ where
 ///
 /// ### Panics
 /// - If `capacity_value.len() >= WIDTH`
-/// - If `OUT_LEN > capacity_value.len()` (we squeeze via the capacity part of the state, only 1 time)
 fn poseidon_replacement_t_sponge_with_trace<A, P, const WIDTH: usize, const OUT_LEN: usize>(
     perm: &P,
     capacity_value: &[A],
@@ -302,11 +301,18 @@ where
     }
 
     // 3. squeeze
-    assert!(
-        OUT_LEN <= cap_len,
-        "unimplemented: squeezing more elements than the capacity length is not supported yet"
-    );
-    state[..OUT_LEN].try_into().unwrap()
+    let mut out = [A::ZERO; OUT_LEN];
+    let mut out_index = 0;
+    while out_index < OUT_LEN {
+        let chunk_size = (OUT_LEN - out_index).min(rate);
+        out[out_index..out_index + chunk_size].copy_from_slice(&state[cap_len..][..chunk_size]);
+        out_index += chunk_size;
+        if out_index < OUT_LEN {
+            // no need to permute in last iteration, `state` is local variable
+            state = poseidon_compress_with_trace::<A, _, WIDTH, WIDTH>(perm, &state, trace); // T-sponge
+        }
+    }
+    out
 }
 
 /// A tweakable hash function implemented using Poseidon1
